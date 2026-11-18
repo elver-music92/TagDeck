@@ -181,7 +181,8 @@ A library tool for DJs who use Serato DJ (was "Serato Tagger" up to 0.9.28). Not
     Unsorted folder is gone. Crate menu: Edit rules, Duplicate, Convert, Make twin crate, Move, Rename, Delete.
     Serato Columns lists every column Serato offers. Tools items without "...". Spin boxes padded.
   * 1.2.2: first public release (GPL-3.0). Original backgrounds: Vice and Amber (was Ember) are colour
-    gradients; the logo keeps the app icon's orange in every theme; plain starting tag lists.
+    gradients; the logo keeps the app icon's orange in every theme and is drawn in
+    Space Grotesk (static weights next to the variable font: Qt saw only Light); Amber is the default theme; plain starting tag lists.
   * Diagnostics go to tagdeck_debug.log next to this script (or the .exe).
 
 Setup (Windows)
@@ -308,6 +309,7 @@ def setup_logging():
 
 DEFAULT_CONFIG = {
     "library": "",
+    "theme": "Amber",                 # 1.2.2: the default theme
     "fields": {
         "g": {"name": "Grouping", "enabled": True, "sep": ", ",
               "tags": ["warm-up", "peak", "classic", "vocal", "instrumental"]},
@@ -465,7 +467,7 @@ def load_config():
                     cfg["smart_dirs"].append(old)
                 cfg["config_version"] = 8
             cfg.pop("smart_dir", None)
-            cfg["theme"] = THEME_RENAMED.get(cfg.get("theme", "Neon"), cfg.get("theme", "Neon"))    # 1.2
+            cfg["theme"] = THEME_RENAMED.get(cfg.get("theme", "Amber"), cfg.get("theme", "Amber"))    # 1.2
             for fk in cfg["fields"]:                 # 1.2: the separator only says what is written between tags
                 if cfg["fields"][fk].get("sep") not in (", ", "; "):
                     cfg["fields"][fk]["sep"] = ", "
@@ -1518,6 +1520,16 @@ class WriteBlocked(OSError):
     pass
 
 
+def _exists_exact(p):
+    """1.2.2: the file is there under exactly this name. On Windows "KUNST.crate" also finds "Kunst.crate", so
+    after a capitals-only rename the old name looked as if it still existed (and the rename was undone)."""
+    p = Path(p)
+    try:
+        return p.is_file() and p.name in os.listdir(p.parent)
+    except OSError:
+        return False
+
+
 def _same_file(a, b):
     try:
         return os.path.samefile(a, b)
@@ -1589,7 +1601,7 @@ def apply_state(state, label, backup_base=None):
                 done.append(("file", p))
                 _atomic_write(p, state[p])
         for p in paths:          # final check
-            now = Path(p).read_bytes() if Path(p).is_file() else None
+            now = Path(p).read_bytes() if _exists_exact(p) else None     # 1.2.2: KUNST.crate is not Kunst.crate
             if now != state[p]:
                 raise OSError("%s is not as expected after the change" % p)
     except Exception:
@@ -6831,7 +6843,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Settings")
         self.resize(980, 860)                          # 0.9.19: medium; then the size you left it at
         self.cfg, self.db_path = cfg, db_path
-        self._theme_was = THEME_RENAMED.get(cfg.get("theme", "Neon"), cfg.get("theme", "Neon"))
+        self._theme_was = THEME_RENAMED.get(cfg.get("theme", "Amber"), cfg.get("theme", "Amber"))
         lay = QVBoxLayout(self)
         tabs = QTabWidget()
         self.tabs = tabs
@@ -7005,7 +7017,7 @@ class SettingsDialog(QDialog):
         for n_ in theme_names():
             self.theme_pick.addItem(n_, n_)
         self.theme_pick.setCurrentIndex(max(0, self.theme_pick.findData(
-            THEME_RENAMED.get(cfg.get("theme", "Neon"), cfg.get("theme", "Neon")))))
+            THEME_RENAMED.get(cfg.get("theme", "Amber"), cfg.get("theme", "Amber")))))
         self.theme_pick.setFixedWidth(W)
         forms["show"].addRow("Theme", self.theme_pick)
         self.text_size = QComboBox()
@@ -7368,7 +7380,7 @@ class SettingsDialog(QDialog):
         self.theme = QComboBox()
         for n in theme_names():
             self.theme.addItem(n, n)
-        self.theme.setCurrentIndex(max(0, self.theme.findData(self.cfg.get("theme", "Neon"))))
+        self.theme.setCurrentIndex(max(0, self.theme.findData(self.cfg.get("theme", "Amber"))))
         self.theme.currentIndexChanged.connect(lambda _: self._load_theme_widgets())
         top.addWidget(self.theme, 1)
         for label, fn in (("Duplicate...", self._dup_theme), ("Reset", self._reset_theme),
@@ -10333,6 +10345,9 @@ class LogoBadge(QWidget):
         probe.ensurePolished()
         self.nf = QFont(probe.font())
         probe.deleteLater()
+        if fam:                                   # 1.2.2: the style sheet's body font (Inter) won over the logo's
+            self.nf.setFamily(fam)                # Space Grotesk; the logo is always drawn in the title font
+        self.nf.setBold(True)
         fmn = QFontMetricsF(self.nf)
         self.nw = fmn.horizontalAdvance(APP_NAME)
         self.nr = fmn.tightBoundingRect(APP_NAME)                 # ink of the name (y relative to the baseline)
@@ -16525,7 +16540,7 @@ class MainWindow(TitleBarMixin, QMainWindow):
     def _theme_file_mtime(self):
         """When the theme's files last changed (theme.json, picture, icons, fonts; 0.9.22: all of them, since
         theme.json is now only written when it changes)."""
-        d = THEMES_DIR / self.cfg.get("theme", "Neon")
+        d = THEMES_DIR / self.cfg.get("theme", "Amber")
         try:
             files = [p for p in d.iterdir() if p.is_file() and not p.name.startswith("_")]
             for sub in ("icons", "fonts"):
@@ -16550,11 +16565,11 @@ class MainWindow(TitleBarMixin, QMainWindow):
             t0[0] = now
         save_config(self.cfg)
         SCROLL_MARGIN[0] = int(self.cfg.get("scroll_margin", 3))
-        if self.cfg.get("theme", "Neon") != THEME.get("name") or getattr(self, "_theme_mtime", None) != \
+        if self.cfg.get("theme", "Amber") != THEME.get("name") or getattr(self, "_theme_mtime", None) != \
                 self._theme_file_mtime():
             self.setUpdatesEnabled(False)            # 0.9.23: drawn once, after the whole change
             try:
-                apply_theme(QApplication.instance(), self.cfg.get("theme", "Neon"))
+                apply_theme(QApplication.instance(), self.cfg.get("theme", "Amber"))
             finally:
                 self.setUpdatesEnabled(True)
             self._theme_mtime = self._theme_file_mtime()
@@ -18412,7 +18427,7 @@ def main():
     except Exception:
         log.exception("crash log not available")
     cfg = load_config()
-    apply_theme(app, cfg.get("theme", "Neon"))
+    apply_theme(app, cfg.get("theme", "Amber"))
     win = MainWindow(cfg)
     if getattr(win, "_start_max", False):          # 1.1.3: it was maximized when you left it
         win.showMaximized()

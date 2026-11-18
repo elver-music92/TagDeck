@@ -2,12 +2,12 @@
 
 ![TagDeck](assets/banner.png)
 
-**Tag · Crate · Play.** A library tool for DJs who use Serato DJ on Windows.
+**Chip Tagging and Crate Tools for Serato DJ** (Windows).
 
 TagDeck reads your Serato library and crates. You can tag tracks fast with chips in Grouping and Comment, look up
 missing info, check audio quality and manage crates. Every change waits for your review before anything is written.
 
-![TagDeck, Neon theme](screenshots/neon.png)
+![TagDeck, Amber theme](screenshots/amber.png)
 
 > TagDeck is not affiliated with or endorsed by Serato. Serato and Serato DJ are trademarks of their owner.
 
@@ -35,11 +35,11 @@ missing info, check audio quality and manage crates. Every change waits for your
   token) and iTunes Search. You choose what to keep.
 - **Quality check**: finds low-quality or upscaled files from their frequency cutoff.
 - **Folders**: browse your computer like Serato's *Files* panel.
-- **Themes**: Neon, Amber, Vice, Mist and Classic.
+- **Themes**: Amber (default), Neon, Vice, Mist and Classic.
 
-| Amber | Vice | Mist |
+| Neon | Vice | Mist |
 |---|---|---|
-| ![Amber](screenshots/amber.png) | ![Vice](screenshots/vice.png) | ![Mist](screenshots/mist.png) |
+| ![Neon](screenshots/neon.png) | ![Vice](screenshots/vice.png) | ![Mist](screenshots/mist.png) |
 
 ## Safety
 
@@ -52,13 +52,22 @@ Still, **back up your `_Serato_` folder before you start.** This is free softwar
 
 ## Install (Windows)
 
+Download **TagDeck-Setup-<version>.exe** from [Releases](../../releases/latest) and run it. You need no Python
+and no administrator rights. TagDeck is installed for your user, in `%LOCALAPPDATA%\Programs\TagDeck`, with a
+Start menu entry and an optional desktop icon. To update, run the newer setup. Your settings, undo logs and backups
+are kept.
+
+The setup is not code-signed yet. On the first run, Windows may show *"Windows protected your PC"*: click
+*More info › Run anyway*.
+
+A **portable** zip is on the same page as well. Unzip it anywhere and run `TagDeck.exe`.
+
+### Build it yourself
+
 1. Install [Python 3.11 or newer](https://www.python.org/downloads/windows/). Tick *Add python.exe to PATH*.
 2. Download this repository (*Code › Download ZIP*) and unzip it.
-3. Double-click **`TagDeck_install.bat`**. It:
-   - installs the Python packages,
-   - builds `TagDeck\TagDeck.exe` next to it, with the theme fonts from `fonts/`.
-
-   Run it again later to update. Your settings are kept.
+3. Double-click **`TagDeck_install.bat`**. It installs the Python packages and builds `TagDeck\TagDeck.exe` next to
+   it.
 
 ### Run from source
 

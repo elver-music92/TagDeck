@@ -1,0 +1,102 @@
+# Builds TagDeck.exe and the Windows setup on GitHub's Windows machines.
+# - Publishing a release: the setup and a portable zip are added to that release.
+# - Actions > Build Windows setup > Run workflow: a test build, downloadable from the run's page (Artifacts);
+#   with a release tag (e.g. v1.2.2) the files are also added to that release.
+name: Build Windows setup
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Also add the files to this release (e.g. v1.2.2); empty = test build only"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python packages
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller PySide6 mutagen numpy av
+
+      - name: Self-test
+        env:
+          QT_QPA_PLATFORM: offscreen
+          TAGGER_NOAUDIO: "1"
+        run: python TagDeck.py --selftest
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $m = Select-String -Path TagDeck.py -Pattern '^APP_VERSION = "([0-9.]+)"' | Select-Object -First 1
+          $v = $m.Matches[0].Groups[1].Value
+          if (-not $v) { throw "APP_VERSION not found in TagDeck.py" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "TagDeck $v"
+
+      - name: Icon and version info
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          New-Item -ItemType Directory -Force build | Out-Null
+          python TagDeck.py --write-icon build\tagdeck.ico
+          python TagDeck.py --write-version-file build\version.txt
+          if (-not (Test-Path build\tagdeck.ico)) { throw "the icon was not made" }
+
+      - name: TagDeck.exe (PyInstaller)
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --onedir --windowed --name TagDeck `
+            --icon "$PWD\build\tagdeck.ico" --version-file "$PWD\build\version.txt" `
+            --distpath build\dist --workpath build\work --specpath build `
+            --collect-all av --add-data "$PWD\fonts;fonts" `
+            --exclude-module tkinter --exclude-module PIL --exclude-module yaml `
+            --exclude-module soundfile --exclude-module miniaudio --exclude-module serato_tools `
+            TagDeck.py
+          if (-not (Test-Path build\dist\TagDeck\TagDeck.exe)) { throw "TagDeck.exe was not built" }
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc /DAppVersion=${{ steps.ver.outputs.version }} `
+                  /DSrcDir="$PWD\build\dist\TagDeck" /DIconFile="$PWD\build\tagdeck.ico" installer\TagDeck.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build\dist\TagDeck -DestinationPath "build\setup\TagDeck-${{ steps.ver.outputs.version }}-portable.zip"
+
+      - name: Keep the files of this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: TagDeck-${{ steps.ver.outputs.version }}-windows
+          path: build\setup\*
+
+      - name: Add them to the release
+        if: github.event_name == 'release' || inputs.release_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          gh release upload "$env:TAG" (Get-ChildItem build\setup\*).FullName --clobber

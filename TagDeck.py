@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TagDeck 1.2.3 - Tag · Crate · Play
+TagDeck 1.2.5 - Tag · Crate · Play
 © 2026 Thanasis Karageorgos
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
@@ -194,6 +194,13 @@ A library tool for DJs who use Serato DJ (was "Serato Tagger" up to 0.9.28). Not
     Values. x in the search box. Edit lists opens on its field. "&" shows in menus (R&B). Dialogs open in front.
     TagDeck opens once (a second start brings it forward). Replace on many tracks: 5 s -> instant. A write that
     does not read back is read once more, and logged in detail.
+  * 1.2.4: edited hotkeys were not kept (Apply / OK put the old ones back). Replace across a selection offers to
+    update the hotkeys that put the old tag, as well as the smart crate rules.
+  * 1.2.5: Research of one field ticks it whenever found ("same as now" when equal). Smart crate values as a plain
+    list. Picked chips: "New smart crate from N chips > All / Any", "Deselect" (Esc). The Tags buttons open Edit
+    lists. Status bar: the selected crates under the crate panel, the selection under the list. Edit lists:
+    Rename. Undo / Redo in one frame, grey when empty. Chip menu: Rename here, Remove asks from where. Double /
+    Half BPM on Serato's Tempo Map. Split twins from selected smart crates.
   * Diagnostics go to tagdeck_debug.log next to this script (or the .exe).
 
 Setup (Windows)
@@ -221,7 +228,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import (QAbstractTableModel, QByteArray, QEvent, QModelIndex, QPersistentModelIndex, QObject, QPointF, QRect, QRectF, QSize,
+from PySide6.QtCore import (QAbstractTableModel, QByteArray, QEvent, QModelIndex, QPersistentModelIndex, QObject, QPoint, QPointF, QRect, QRectF, QSize,
                             QSortFilterProxyModel, QRunnable, QThreadPool, QTimer, Qt, QUrl, Signal,
                             qInstallMessageHandler)
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen,
@@ -229,7 +236,7 @@ from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QFontMetricsF, 
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMenu, QMessageBox, QProgressDialog, QPushButton, QSlider, QSplitter, QStyle, QStyledItemDelegate,
+    QMenu, QMessageBox, QProgressDialog, QPushButton, QSlider, QSplitter, QStatusBar, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QTableView, QTableWidget, QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget,
     QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget,
 )
@@ -3649,6 +3656,40 @@ def beatgrid_scaled(data, factor):
     return bytes(out)
 
 
+def tempo_map_scaled(data, factor):
+    """1.2.5: a "Serato Tempo Map" at factor x the tempo (2 or 0.5): every BPM x factor, every tempo change at
+    factor x its beat (ticks, 960 a beat); beat 0 stays where it is. None when halving puts a change between
+    beats (an odd beat) or the data is not understood."""
+    if not data or len(data) < 16 or data[:2] != b"\x02\x00":
+        return None
+    (n,) = struct.unpack(">I", data[12:16])
+    if not 0 < n < 100000 or 16 + n * 33 > len(data):
+        return None
+    out = bytearray(data)
+    for i in range(n):
+        o = 16 + i * 33
+        (tick,) = struct.unpack(">Q", data[o:o + 8])
+        (bpm,) = struct.unpack(">d", data[o + 8:o + 16])
+        if not (math.isfinite(bpm) and 10 < bpm < 400):
+            return None
+        if factor < 1 and tick % 1920:
+            return None
+        out[o:o + 8] = struct.pack(">Q", int(round(tick * factor)))
+        out[o + 8:o + 16] = struct.pack(">d", bpm * factor)
+    return bytes(out)
+
+
+def autotags_scaled(data, new_bpm):
+    """1.2.5: "Serato Autotags" (01 01, then BPM, gain, ... as texts) with the BPM text changed."""
+    if not data or len(data) < 3 or data[:2] != b"\x01\x01":
+        return None
+    parts = data[2:].split(b"\x00")
+    if not parts or not parts[0]:
+        return None
+    parts[0] = ("%.2f" % new_bpm).encode()
+    return data[:2] + b"\x00".join(parts)
+
+
 def parse_tempo_map(data):
     """Serato's newer "Serato Tempo Map" -> the same markers as parse_beatgrid (0.9.13: tempo changes too).
     Layout: u16 version 2, u16 1, f64 time (s) of beat 0, u32 count, then per tempo segment (33 bytes):
@@ -5552,7 +5593,7 @@ class ChipPopup(QFrame):
         t = self.mw.model.tracks[self.mw.proxy.mapToSource(ix).row()] if ix.isValid() else {}
         p.setPen(QColor(THEME.get("text_dim", "#9aa3b2")))
         p.drawText(QRect(10, 4, self.width() - 20, 22), Qt.AlignmentFlag.AlignVCenter,
-                   "%s  \u00b7  %s" % (self.mw.cfg["fields"][self.f]["name"], t.get("title", "")))
+                   self.mw.cfg["fields"][self.f]["name"])
         p.end()
         p = QPainter(self)
         self.dg.paint_chips(p, self._area(), self._toks(), self.mw.view.font())
@@ -5961,6 +6002,22 @@ class DragTagView(TagView):
             p.end()
 
 
+def _dir_size(d):
+    try:
+        return sum(f.stat().st_size for f in Path(d).rglob("*") if f.is_file())
+    except OSError:
+        return 0
+
+
+class _PressLogButton(QPushButton):
+    """1.2.5: a button that writes the mouse press to the log (to see whether a click reached it)."""
+    press_name = ""
+
+    def mousePressEvent(self, e):
+        log.info("button pressed: %s", self.press_name or self.text())
+        super().mousePressEvent(e)
+
+
 class CrateTree(QTreeWidget):
     """The crate tree, with drops: tracks onto a normal crate (add), a crate onto another (make it a subcrate),
     and - when sorted by Custom order - a crate between two of its neighbours (change the order)."""
@@ -6235,12 +6292,7 @@ class SmartCrateDialog(QDialog):
                         ed.addItems(["%d%s" % (n, ab) for n in range(1, 13) for ab in "AB"])
                     elif tf and tf in self.cfg["fields"]:
                         ed.addItems(sort_tags(self.cfg["fields"][tf].get("tags", [])))
-                        cols = self.cfg["fields"][tf].get("colors", {})          # 1.2.3: the tags as chips
-                        for k_ in range(ed.count()):
-                            c_ = cols.get(ed.itemText(k_).strip().lower())
-                            if c_:
-                                ed.setItemData(k_, QColor(c_), Qt.ItemDataRole.BackgroundRole)
-                                ed.setItemData(k_, chip_text_color(QColor(c_)), Qt.ItemDataRole.ForegroundRole)
+                        cols = self.cfg["fields"][tf].get("colors", {})   # 1.2.5: plain list, the value as a chip
 
                         def chip_look(txt, e=ed, cols=cols):
                             c_ = cols.get((txt or "").strip().lower())
@@ -6697,7 +6749,7 @@ class TagListDialog(QDialog):
             pl.addWidget(lw)
             side = QVBoxLayout()
             for label, fn in (("Add", lambda _=False, w=lw: self._new(w)),
-                              ("Edit", lambda _=False, w=lw: self._edit(w)),
+                              ("Rename", lambda _=False, w=lw: self._edit(w)),      # 1.2.5: was Edit
                               ("Duplicate", lambda _=False, w=lw: self._dup(w)),
                               ("Merge...", lambda _=False, ff=f, w=lw: self._merge(ff, w)),
                               ("Delete", lambda _=False, ff=f, w=lw: self._del(ff, w)),
@@ -7064,82 +7116,6 @@ class TagListDialog(QDialog):
     def _ok(self):
         if self._apply():
             self.accept()
-
-
-class QuickTagDialog(QDialog):
-    """Quick access to one field's tag list: see it, add a new tag, optionally apply it to the selection."""
-
-    def __init__(self, parent, cfg, f, n_sel):
-        super().__init__(parent)
-        self.cfg, self.f = cfg, f
-        self.added = []
-        self.edit_lists = False
-        name = cfg["fields"][f]["name"]
-        self.setWindowTitle("%s tags" % name)
-        self.resize(360, 480)
-        lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Tags in the %s list" % name))
-        self.lw = QListWidget()
-        for t in cfg["fields"][f]["tags"]:
-            self.lw.addItem(t)
-        lay.addWidget(self.lw, 1)
-        row = QHBoxLayout()
-        self.edit = QLineEdit()
-        self.edit.setPlaceholderText("New tag")
-        add = QPushButton("Add")
-        add.setDefault(True)
-        add.clicked.connect(self._add)
-        row.addWidget(self.edit, 1)
-        row.addWidget(add)
-        lay.addLayout(row)
-        self.msg = QLabel("")
-        lay.addWidget(self.msg)
-        self.apply = QCheckBox("Also add new tags to the %d selected track%s" % (n_sel, "" if n_sel == 1 else "s"))
-        self.apply.setEnabled(n_sel > 0)
-        self.apply.setChecked(n_sel > 0)
-        lay.addWidget(self.apply)
-        bb = QHBoxLayout()
-        ed = QPushButton("Edit lists...")
-        ed.setAutoDefault(False)
-        ed.clicked.connect(self._edit)
-        close = QPushButton("Close")
-        close.setAutoDefault(False)
-        close.clicked.connect(self.accept)
-        bb.addWidget(ed)
-        bb.addStretch()
-        bb.addWidget(close)
-        lay.addLayout(bb)
-
-    def _add(self):
-        v = self.edit.text().strip()
-        if not v:
-            return
-        if any(c in v for c in ",;|"):
-            self.msg.setText("A tag cannot contain , ; or |")
-            return
-        tags = self.cfg["fields"][self.f]["tags"]
-        if v.lower() in {t.lower() for t in tags}:
-            self.msg.setText("\"%s\" is already in the list" % v)
-            return
-        tags.append(v)
-        ensure_tag_colors(self.cfg)            # sorts the list and gives the new tag a free color
-        self.lw.clear()
-        self.lw.addItems(self.cfg["fields"][self.f]["tags"])
-        self.added.append(v)
-        self.edit.clear()
-        self.msg.setText("Added \"%s\"" % v)
-        self.edit.setFocus()
-
-    def _edit(self):
-        self.edit_lists = True
-        self.accept()
-
-
-def _dir_size(d):
-    try:
-        return sum(f.stat().st_size for f in Path(d).rglob("*") if f.is_file())
-    except OSError:
-        return 0
 
 
 class ToggleSwitch(QCheckBox):
@@ -8317,6 +8293,7 @@ class SettingsDialog(QDialog):
             act = self.hk_cur if self.hk_cur != GENERAL_PROFILE else self.cfg.get("hotkey_profile")
             if act not in self.hk_work or act == GENERAL_PROFILE:
                 act = next(n for n in self.hk_order if n != GENERAL_PROFILE)
+            self.cfg.pop("hotkeys", None)          # 1.2.4: the old list of keys overwrote the edited one
             hk_switch(self.cfg, act)
             self.cfg["hotkey_target"] = self.target.currentData()
         self.cfg["audio_device"] = self.device.currentData()
@@ -9554,6 +9531,7 @@ class ResearchDialog(QDialog):
         super().__init__(mw)
         from PySide6.QtWidgets import QSplitter as _Sp
         self.mw, self.rows, self.fields = mw, list(rows), set(fields)
+        self.single = self.fields != {k for k, _ in RESEARCH_FIELDS}     # 1.2.5: one field asked (Year, Genre...)
         self.setWindowTitle("Research - %d track%s" % (len(rows), "" if len(rows) == 1 else "s"))
         self.resize(1180, 780)
         self.cache = research_cache_load()
@@ -9883,6 +9861,8 @@ class ResearchDialog(QDialog):
         proposal different from what the track has; replacing ones too (OK / Apply asks), unless Only empty."""
         if not p or key not in self.fields:
             return False
+        if self.single:                          # 1.2.5: the field you asked for is ticked whenever found
+            return True
         if key in ("title", "artist"):           # spelling counts here (capitals, symbols)
             same = norm(cur) == norm(p["value"])
         else:
@@ -9917,8 +9897,11 @@ class ResearchDialog(QDialog):
             if key == "c":
                 note.setText("your tags (+); taken when changed")
             elif p:
-                note.setText('<span style="color:%s">●</span> %s%s' % (
-                    self.COLORS[p["status"]], p["source"], (" - " + p["note"]) if p.get("note") else ""))
+                same = norm(cur) == norm(p["value"]) if key in ("title", "artist") else \
+                    norm(cur).lower() == norm(p["value"]).lower()
+                note.setText('<span style="color:%s">●</span> %s%s%s' % (
+                    self.COLORS[p["status"]], p["source"], (" - " + p["note"]) if p.get("note") else "",
+                    " - same as now" if same and cur else ""))
             else:
                 note.setText('<span style="color:%s">●</span> not found' % self.COLORS["none"]
                              if i in self.results else "")
@@ -9935,7 +9918,7 @@ class ResearchDialog(QDialog):
         on = (ch.get("on") or {}).get("cover")
         if on is None:
             on = bool(pc or ch.get("cover_data")) and "cover" in self.fields and not ch.get("cover_done") \
-                and not (has and self.only_empty.isChecked())
+                and not (has and self.only_empty.isChecked() and not self.single)
         self.cov_use.blockSignals(True)
         self.cov_use.setChecked(bool(on))
         self.cov_use.setEnabled(bool(pc or ch.get("cover_data")))
@@ -10714,7 +10697,7 @@ def funnel_icon(color, count=0):
 
 # ---- 0.9.29: TagDeck - name, logo (the tag chip winking with its x), window icon, own title bar, About
 APP_NAME = "TagDeck"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.5"
 APP_COPYRIGHT = "\u00A9 2026 Thanasis Karageorgos"
 APP_SLOGAN = "Tag · Crate · Play"
 LOGO_INK = "#C9732F"
@@ -12059,10 +12042,89 @@ class FilterBar(QWidget):
             mw.crate_new([], rows, default="Filtered")
 
 
+class _EscHook(QObject):
+    """1.2.5: Esc on the track list clears the picked chips (only while some are picked)."""
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and \
+                ev.key() == Qt.Key.Key_Escape and CHIP_SEL:
+            self.fn()
+            ev.accept()
+            return True
+        return False
+
+
+class _ResizeHook(QObject):
+    """Calls fn (later) when the watched widget is resized or shown."""
+
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Hide):
+            QTimer.singleShot(0, self.fn)
+        return False
+
+
+class _TDStatusBar(QStatusBar):
+    """1.2.5: crate totals under the crate panel, the selection under the track list, messages next to them
+    (a message no longer hides them), the row slider on the right."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.box = QWidget()
+        h = QHBoxLayout(self.box)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        self.crate_lb, self.sel_lb, self.msg_lb = QLabel(""), QLabel(""), QLabel("")
+        for lb in (self.crate_lb, self.sel_lb, self.msg_lb):
+            lb.setProperty("themeText", True)
+            lb.setTextFormat(Qt.TextFormat.PlainText)
+        self.crate_lb.setMinimumWidth(0)
+        h.addWidget(self.crate_lb, 0)
+        h.addWidget(self.sel_lb, 0)
+        h.addSpacing(18)
+        h.addWidget(self.msg_lb, 1)
+        self.addWidget(self.box, 1)
+        self._msg = ""
+        self._t = QTimer(self)
+        self._t.setSingleShot(True)
+        self._t.timeout.connect(self.clearMessage)
+
+    def set_dim(self, color):
+        for lb in (self.crate_lb, self.sel_lb):
+            lb.setStyleSheet("color:%s;" % color)
+
+    def showMessage(self, text, timeout=0):
+        self._msg = text or ""
+        self.msg_lb.setText(self._msg)
+        self.msg_lb.setToolTip(self._msg if len(self._msg) > 60 else "")
+        if timeout:
+            self._t.start(int(timeout))
+        else:
+            self._t.stop()
+        self.messageChanged.emit(self._msg)
+
+    def currentMessage(self):
+        return self._msg
+
+    def clearMessage(self):
+        self._t.stop()
+        self._msg = ""
+        self.msg_lb.setText("")
+        self.messageChanged.emit("")
+
+
 class MainWindow(TitleBarMixin, QMainWindow):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.setStatusBar(_TDStatusBar(self))       # 1.2.5
         self.setWindowTitle("%s \u2014 %s" % (APP_NAME, APP_SLOGAN))
         self.setWindowIcon(app_icon())
         self.resize(1400, 820)
@@ -12468,13 +12530,28 @@ class MainWindow(TitleBarMixin, QMainWindow):
         ta = QHBoxLayout(self.top_actions)
         ta.setContentsMargins(6, 0, 0, 0)
         ta.setSpacing(2)
-        for b_, tip in ((self.btn_undo, "Undo (Ctrl+Z)"), (self.btn_redo, "Redo (Ctrl+Y)")):
+        self.undo_frame = QFrame()                    # 1.2.5: one frame; the side with nothing left is grey
+        self.undo_frame.setObjectName("undoFrame")
+        uf = QHBoxLayout(self.undo_frame)
+        uf.setContentsMargins(1, 1, 1, 1)
+        uf.setSpacing(0)
+        self.undo_div = QFrame()
+        self.undo_div.setFixedWidth(1)
+        for k_, (b_, tip) in enumerate(((self.btn_undo, "Undo (Ctrl+Z)"), (self.btn_redo, "Redo (Ctrl+Y)"))):
             b_.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             b_.setAutoRaise(True)
             b_.setToolTip(tip)
-            b_.setFixedSize(28, 26)
+            b_.setFixedSize(28, 22)
             b_.setIconSize(QSize(16, 16))
-            ta.addWidget(b_)
+            if not THEME.get("classic"):
+                ic_ = theme_icon("undo" if k_ == 0 else "redo")
+                ic_.addPixmap(theme_icon("undo" if k_ == 0 else "redo", "#5a616c").pixmap(16, 16),
+                              QIcon.Mode.Disabled)
+                b_.setIcon(ic_)
+            uf.addWidget(b_)
+            if k_ == 0:
+                uf.addWidget(self.undo_div)
+        ta.addWidget(self.undo_frame, 0, Qt.AlignmentFlag.AlignVCenter)
         ta.addSpacing(6)
         ta.addWidget(self.btn_review, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addLayout(tools)
@@ -12509,6 +12586,8 @@ class MainWindow(TitleBarMixin, QMainWindow):
         self.tree_delegate.commitData.connect(self._inline_commit)
         self.tree_delegate.closeEditor.connect(self._inline_closed)
         self.view = DragTagView()
+        self._esc_chips = _EscHook(self.chip_clear)                         # 1.2.5: Esc deselects picked chips
+        QTimer.singleShot(0, lambda: self.view.installEventFilter(self._esc_chips))   # last in = asked first
         self.view.reorder_ok = self._reorder_ok
         self.view.rowsDropped.connect(self._rows_dropped)
 
@@ -12596,10 +12675,9 @@ class MainWindow(TitleBarMixin, QMainWindow):
         sh.addWidget(self.row_slider, 0, Qt.AlignmentFlag.AlignVCenter)
         self.row_slider.setFixedHeight(max(16, QFontMetrics(rl.font()).height()))
         self.row_slider.align_font = rl.font()
-        self.sum_lb = QLabel("")                      # 1.2.3: size and length of the list / the selection
-        self.sum_lb.setProperty("themeText", True)
-        self.sum_lb.setStyleSheet("color:%s;" % THEME.get("text_dim", "#7c8492"))
-        self.statusBar().addPermanentWidget(self.sum_lb)
+        sb_ = self.statusBar()                        # 1.2.5: totals under each list (see _TDStatusBar)
+        sb_.set_dim(THEME.get("text_dim", "#7c8492"))
+        self.sum_lb = sb_.sel_lb
         self._sum_timer = QTimer(self)
         self._sum_timer.setSingleShot(True)
         self._sum_timer.setInterval(150)
@@ -12726,10 +12804,14 @@ class MainWindow(TitleBarMixin, QMainWindow):
         outer_lv.addWidget(vsplit, 1)
         lv = outer_lv
         split.addWidget(left)
+        self.left_panel = left
         split.addWidget(self.view)
         split.setStretchFactor(1, 1)
         split.setSizes([230, 1100])
         self.main_split = split
+        split.splitterMoved.connect(lambda *_: QTimer.singleShot(0, self._sync_sb))
+        self._sb_sync_f = _ResizeHook(self._sync_sb)
+        left.installEventFilter(self._sb_sync_f)
         cw = self.cfg.get("crate_panel_w")             # 1.1.3: the width you left the crate panel at
         if isinstance(cw, int) and cw > 40:
             split.setSizes([cw, max(200, 1330 - cw)])
@@ -12756,20 +12838,21 @@ class MainWindow(TitleBarMixin, QMainWindow):
                 self.view.setItemDelegateForColumn(i, self._chip_delegates[c[0]])
             else:
                 self.view.setItemDelegateForColumn(i, self.plain_delegate)
-        while self.tag_btn_box.count():
-            w = self.tag_btn_box.takeAt(0).widget()
-            if w is not None:
-                w.hide()
-                w.setParent(None)
-                w.deleteLater()
+        if not hasattr(self, "_tag_btns"):               # 1.2.5: made once, then only shown / renamed
+            self._tag_btns = {}
+            for f in TAG_KEYS:
+                b = _PressLogButton("")
+                b.press_name = f
+                b.clicked.connect(lambda _=False, ff=f: self.quick_tags(ff))
+                self.tag_btn_box.addWidget(b)
+                self._tag_btns[f] = b
         for f in TAG_KEYS:
-            if not self.cfg["fields"][f].get("enabled"):
-                continue
+            b = self._tag_btns[f]
             name = self.cfg["fields"][f]["name"]
-            b = QPushButton("%s Tags" % name)
-            b.setToolTip("Open the %s tag list: add a new tag, optionally to the selected tracks" % name)
-            b.clicked.connect(lambda _=False, ff=f: self.quick_tags(ff))
-            self.tag_btn_box.addWidget(b)
+            if b.text() != "%s Tags" % name:
+                b.setText("%s Tags" % name)
+            b.setToolTip("Open the %s list in Edit lists" % name)
+            b.setVisible(bool(self.cfg["fields"][f].get("enabled")))
         self.model.invalidate()
 
     def _fix_lead_columns(self, *_):
@@ -13902,26 +13985,53 @@ class MainWindow(TitleBarMixin, QMainWindow):
     def _fmt_size(b):
         return "%.2f GB" % (b / 1e9) if b >= 1e9 else "%.0f MB" % (b / 1e6) if b >= 1e7 else "%.1f MB" % (b / 1e6)
 
+    def _sync_sb(self):
+        """1.2.5: the crate totals take the crate panel's width, so the selection starts at the track list."""
+        try:
+            sb_ = self.statusBar()
+            lp = getattr(self, "left_panel", None)
+            if lp is None or not lp.isVisible():
+                sb_.crate_lb.setFixedWidth(0)
+                return
+            right = lp.mapTo(self, QPoint(lp.width(), 0)).x()
+            left = sb_.box.mapTo(self, QPoint(0, 0)).x()
+            sb_.crate_lb.setFixedWidth(max(0, right - left + self.main_split.handleWidth()))
+        except Exception:
+            log.exception("status bar width")
+
     def _update_sums(self):
-        """1.2.3: tracks, size and length of what the list shows (one or more crates) and of the selection."""
+        """1.2.3: totals; 1.2.5: the selected crates under the crate panel, the selected tracks under the list
+        (and how many are shown, only when a search or filter hides some)."""
         try:
             tr = self.model.tracks
             shown = [self.proxy.mapToSource(self.proxy.index(i, 0)).row() for i in range(self.proxy.rowCount())]
             sel = self.selected_rows()
+            al = self.proxy.allowed
 
             def tot(rows):
                 return (sum(size_sort(tr[r].get("size", "")) for r in rows),
                         sum(_len_seconds(tr[r].get("length", "")) for r in rows))
-            b, sec = tot(shown)
-            txt = "%d track%s  \u00b7  %s  \u00b7  %s" % (len(shown), "" if len(shown) == 1 else "s", self._fmt_size(b),
-                                                       self._fmt_len(sec))
+
+            def line(n, word, rows):
+                b, sec = tot(rows)
+                return "%d %s  \u00b7  %s  \u00b7  %s" % (n, word, self._fmt_size(b), self._fmt_len(sec))
+            crate_rows = [r for r in (al if al is not None else range(len(tr)))
+                          if 0 <= r < len(tr) and not tr[r].get("gone") and not tr[r].get("outside")]
+            items = [x for x in self.tree.selectedItems() if CrateTree.kind(x) in ("crate", "smart", "group")]
+            nc = len({tuple(p.lower() for p in self._item_parts(x)) for x in items})
+            head = ("%d crate%s  \u00b7  " % (nc, "" if nc == 1 else "s")) if nc else ""
+            ct = head + line(len(crate_rows), "track" if len(crate_rows) == 1 else "tracks", crate_rows)
+            sb_ = self.statusBar()
+            sb_.crate_lb.setText(" " + ct)
+            sb_.crate_lb.setToolTip(ct + "\n(a track in two selected crates counts once)")
+            parts = []
+            if len(shown) != len(crate_rows):
+                parts.append(line(len(shown), "shown", shown))
             if len(sel) > 1:
-                b2, s2 = tot(sel)
-                txt = "%d selected  \u00b7  %s  \u00b7  %s     |     %s" % (len(sel), self._fmt_size(b2),
-                                                                         self._fmt_len(s2), txt)
-            self.sum_lb.setText(txt + "   ")
-            self.sum_lb.setToolTip("Size and length from the Serato library (the list shown%s)" % (
-                "; the selection first" if len(sel) > 1 else ""))
+                parts.append(line(len(sel), "selected", sel))
+            txt = "     |     ".join(parts)
+            sb_.sel_lb.setText(("  " + txt) if txt else "")
+            sb_.sel_lb.setToolTip("Size and length from the Serato library" if txt else "")
         except Exception:
             log.exception("sums")
 
@@ -14266,6 +14376,12 @@ class MainWindow(TitleBarMixin, QMainWindow):
 
     def _is_twin(self, item):
         return item is not None and CrateTree.kind(item) == "crate" and bool(item.data(0, TWIN_ROLE))
+
+    def _twin_item_of(self, item):
+        """1.2.5: the twin crate's tree item of a smart crate (None if it has none)."""
+        low = [p.lower() for p in self._item_parts(item)]
+        return next((x for x in self._tree_items() if self._is_twin(x) and
+                     [p.lower() for p in self._item_parts(x)] == low), None)
 
     def _smart_item_of(self, item):
         """The smart crate's tree item of a twin."""
@@ -14746,7 +14862,11 @@ class MainWindow(TitleBarMixin, QMainWindow):
             if smarts:
                 m.addAction(crate_iso_icon("twin"), "Make twin crates for the %d smart crates" % len(smarts)
                             ).triggered.connect(lambda: self.twin_make(smarts))
-            twins = [x for x in sel if self._is_twin(x)]
+            twins = []                         # 1.2.5: what was really selected (sel holds a twin's smart crate)
+            for x in self.tree.selectedItems():
+                tw_ = x if self._is_twin(x) else self._twin_item_of(x) if CrateTree.kind(x) == "smart" else None
+                if tw_ is not None and tw_ not in twins:
+                    twins.append(tw_)
             if twins:
                 m.addAction("Split %d twin%s from %s smart crate%s..." % (
                     len(twins), "" if len(twins) == 1 else "s", "its" if len(twins) == 1 else "their",
@@ -14790,6 +14910,10 @@ class MainWindow(TitleBarMixin, QMainWindow):
                 if self._twin_path(parts) is None:                             # 1.1
                     m.addAction(crate_iso_icon("twin"), "Make twin crate (for rekordbox / USB)").triggered.connect(
                         lambda: self.twin_make([item]))
+                else:
+                    tw_ = self._twin_item_of(item)                             # 1.2.5
+                    if tw_ is not None:
+                        m.addAction("Split its twin...").triggered.connect(lambda: self.twin_split([tw_]))
             elif kind == "crate":
                 m.addAction("Convert to smart crate...").triggered.connect(lambda: self.convert_to_smart(item))
             self._move_menu(m, [item])                                          # 1.1
@@ -15755,10 +15879,11 @@ class MainWindow(TitleBarMixin, QMainWindow):
             a.setEnabled(bool(back))
             a.triggered.connect(lambda _=False, tt=label, rr=back: self.send_to_back(rr, f, tt))
             self._replace_menu(menu, f, label, rows)
-            menu.addAction("Edit Tag...").triggered.connect(lambda _=False, tt=label: self.edit_tag_lists((f, tt)))
+            menu.addAction("Rename \"%s\"..." % shown).triggered.connect(        # 1.2.5: here, not Edit lists
+                lambda _=False, tt=label: self.chip_rename(f, tt))
             menu.addSeparator()
-            menu.addAction("Remove \"%s\"" % shown).triggered.connect(
-                lambda _=False, tt=label: self.apply_tag([row], f, tt, "remove"))
+            menu.addAction("Remove \"%s\"..." % shown).triggered.connect(         # 1.2.5: asks from where
+                lambda _=False, tt=label: self.chip_remove(row, rows, f, tt))
         menu.addAction("Remove Selection...").triggered.connect(lambda: self.remove_from_selection(rows, f))
         if f == "c" and len(rows) <= 30:             # 1.2.3: a comment with several values (written by another tool)
             multi = [r for r in rows if os.path.exists(self.model.tracks[r]["full"]) and
@@ -15769,6 +15894,134 @@ class MainWindow(TitleBarMixin, QMainWindow):
         menu.addAction("Clear \"%s\"%s" % (self.cfg["fields"][f]["name"], cnt(len(rows)))).triggered.connect(
             lambda: self.clear_field(rows, f))
         menu.exec(forced[2] if forced is not None else self.view.viewport().mapToGlobal(pos))
+
+    def _tag_rows(self, f, tag):
+        """1.2.5: the tracks whose field f holds tag."""
+        vocab = self.model.vocab(f)
+        return [r for r, t in enumerate(self.model.tracks) if not t.get("gone") and t[f] and
+                find_tag(parse(t[f], vocab)[0], tag) >= 0]
+
+    def chip_rename(self, f, old):
+        """1.2.5: Rename a tag from its chip: the list, every track, the hotkeys (and the smart crates, asked);
+        a name already in the list merges the two. One Undo step."""
+        crumb("chip_rename")
+        fc = self.cfg["fields"][f]
+        n = len(self._tag_rows(f, old))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Rename tag")
+        v = QVBoxLayout(dlg)
+        form = QFormLayout()
+        form.addRow("%s:" % fc["name"], QLabel(old))
+        ed = QLineEdit(old)
+        ed.selectAll()
+        form.addRow("New name:", ed)
+        v.addLayout(form)
+        v.addWidget(QLabel("Used in %d track%s" % (n, "" if n == 1 else "s")))
+        msg = QLabel("")
+        v.addWidget(msg)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        v.addWidget(bb)
+
+        def ok():
+            t = ed.text().strip()
+            if any(c in t for c in ",;|"):
+                msg.setText("A tag cannot contain , ; or |")
+                return
+            dlg.accept()
+        bb.accepted.connect(ok)
+        bb.rejected.connect(dlg.reject)
+        self._last_dialog = dlg
+        if not dlg.exec():
+            return
+        new = ed.text().strip()
+        if not new or new == old:
+            return
+        tags = fc["tags"]
+        low = {t.strip().lower(): t for t in tags}
+        exist = low.get(new.lower()) if new.lower() != old.strip().lower() else None
+        if exist is not None:
+            if QMessageBox.question(self, "Rename tag", "\"%s\" is already in the %s list.\n\nMerge \"%s\" into "
+                                    "\"%s\"? Tracks with both keep one." % (exist, fc["name"], old, exist)) != \
+                    QMessageBox.StandardButton.Yes:
+                return
+            new = exist
+        old_tags = list(tags)
+        cols = fc.setdefault("colors", {})
+        i = next((k for k, t in enumerate(tags) if t.strip().lower() == old.strip().lower()), -1)
+        if i >= 0:
+            if exist is not None:
+                tags.pop(i)
+            else:
+                tags[i] = new
+            c = cols.pop(old.strip().lower(), None)
+            if c and new.lower() not in cols:
+                cols[new.lower()] = c
+            fc["tags"] = sort_tags(tags)
+        ensure_tag_colors(self.cfg)
+        self.apply_tag_list_ops([{"f": f, "renames": [(old, new)], "removals": [], "old_tags": old_tags,
+                                  "fronts": []}])
+
+    def chip_remove(self, row, rows, f, tag):
+        """1.2.5: Remove a tag: from this track / the selection / every track that has it; optionally from the
+        list too. One Undo step."""
+        crumb("chip_remove")
+        fc = self.cfg["fields"][f]
+        every = self._tag_rows(f, tag)
+        sel = [r for r in rows if r in set(every)]
+        in_list = tag.strip().lower() in {t.strip().lower() for t in fc["tags"]}
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Remove \"%s\"" % tag)
+        v = QVBoxLayout(dlg)
+        from PySide6.QtWidgets import QRadioButton
+        r1 = QRadioButton("From this track only")
+        r2 = QRadioButton("From the %d selected tracks" % len(sel))
+        r3 = QRadioButton("From all %d tracks that have it" % len(every))
+        v.addWidget(r1)
+        if len(sel) > 1:
+            v.addWidget(r2)
+            r2.setChecked(True)
+        else:
+            r1.setChecked(True)
+        v.addWidget(r3)
+        dl = QCheckBox("Also delete it from the %s list" % fc["name"].replace("&", "&&"))
+        dl.setEnabled(False)
+        dl.setVisible(in_list)
+        v.addSpacing(6)
+        v.addWidget(dl)
+        r3.toggled.connect(lambda on: (dl.setEnabled(on), dl.setChecked(False) if not on else None))
+        hk = self._hk_uses(f, tag)
+        sm = [c for c in getattr(self, "smart_cache", {}).values() if any(
+            SMART_FIELD_KEY.get(r.get("field")) == f and isinstance(r.get("value"), str) and
+            rule_value_rename(r["value"], tag, tag + "\u0001") is not None for r in c.get("rules", []))]
+        if hk or sm:
+            note = QLabel("Used by %s; they are not changed." % " and ".join(
+                x for x in ("%d smart crate%s" % (len(sm), "" if len(sm) == 1 else "s") if sm else "",
+                            "%d hotkey%s" % (len(hk), "" if len(hk) == 1 else "s") if hk else "") if x))
+            note.setWordWrap(True)
+            note.setProperty("themeText", True)
+            v.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        bb.addButton("Remove", QDialogButtonBox.ButtonRole.AcceptRole)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        self._last_dialog = dlg
+        if not dlg.exec():
+            return
+        target = every if r3.isChecked() else sel if (r2.isChecked() and len(sel) > 1) else [row]
+        self.model.begin_group()
+        try:
+            if target:
+                self.apply_tag(target, f, tag, "remove")
+        finally:
+            self.model.end_group()
+        if dl.isChecked() and in_list:
+            fc["tags"] = [t for t in fc["tags"] if t.strip().lower() != tag.strip().lower()]
+            fc.get("colors", {}).pop(tag.strip().lower(), None)
+            save_config(self.cfg)
+            self.model.invalidate()
+        self.statusBar().showMessage("Removed \"%s\" from %d track%s%s (pending; Undo takes it back)" % (
+            tag, len(target), "" if len(target) == 1 else "s", " and from the list" if dl.isChecked() else ""), 8000)
 
     def add_to_tag_list(self, f, tags):
         """1.2.3: put values (grey chips) into a field's tag list: they become tags with a color of their own."""
@@ -15813,12 +16066,12 @@ class MainWindow(TitleBarMixin, QMainWindow):
             return
         n = len(CHIP_SEL)
         names = ", ".join("%s: %s" % (self.cfg["fields"][f]["name"], t) for (f, _), t in sorted(CHIP_SEL.items()))
-        hdr = menu.addAction("%d picked: %s" % (n, names if len(names) < 70 else names[:67] + "..."))
-        hdr.setEnabled(False)
-        if n > 1:
-            menu.addAction("New smart crate: tracks with all %d chips..." % n).triggered.connect(
-                lambda: self.smart_from_chips(True))
-            menu.addAction("New smart crate: tracks with any of the %d chips..." % n).triggered.connect(
+        if n > 1:                                   # 1.2.5: two lines; the names are in the tooltip
+            sm = menu.addMenu("New smart crate from %d chips" % n)
+            sm.setToolTipsVisible(True)
+            sm.menuAction().setToolTip(names)
+            sm.addAction("All (tracks with all %d)..." % n).triggered.connect(lambda: self.smart_from_chips(True))
+            sm.addAction("Any (tracks with any of the %d)..." % n).triggered.connect(
                 lambda: self.smart_from_chips(False))
         else:
             menu.addAction("New smart crate with this chip...").triggered.connect(lambda: self.smart_from_chips(True))
@@ -15827,7 +16080,7 @@ class MainWindow(TitleBarMixin, QMainWindow):
         if grey:
             menu.addAction("+  Add the %d grey chip%s to the tag lists" % (len(grey), "" if len(grey) == 1 else "s")
                            ).triggered.connect(lambda: self._add_picked_grey(grey))
-        menu.addAction("Clear the picked chips").triggered.connect(self.chip_clear)
+        menu.addAction("Deselect %d chip%s  (Esc)" % (n, "" if n == 1 else "s")).triggered.connect(self.chip_clear)
         menu.addSeparator()
 
     def _add_picked_grey(self, grey):
@@ -16180,9 +16433,15 @@ class MainWindow(TitleBarMixin, QMainWindow):
                             "name": " \u203a ".join(crate_parts(Path(path).stem))})
         return out
 
-    def offer_rule_update(self, cands, sel=None, rows_before=None):
-        """Ask which smart crates get the new tag name in their rules (one crate change, Ctrl+Z)."""
-        if not cands:
+    def _hk_uses(self, f, old):
+        """1.2.4: the hotkey lines (every profile) that put tag `old` in field f."""
+        return [(p["name"], h) for p in hk_profiles(self.cfg) for h in p["keys"]
+                if h.get("f") == f and h.get("tag", "").strip().lower() == old.strip().lower()]
+
+    def offer_rule_update(self, cands, sel=None, rows_before=None, hk=None):
+        """Ask which smart crates get the new tag name in their rules (one crate change, Ctrl+Z); 1.2.4: and the
+        hotkeys that use the old tag. hk = (f, old, new, lines, still_used)."""
+        if not cands and not (hk and hk[3]):
             return False
         dlg = QDialog(self)
         dlg.setWindowTitle("Smart crate rules")
@@ -16193,6 +16452,17 @@ class MainWindow(TitleBarMixin, QMainWindow):
                     "ticked are the crates whose tracks were all in your selection." % len(sel))
         lb.setWordWrap(True)
         v.addWidget(lb)
+        hk_cb = None
+        if hk and hk[3]:
+            f_, old_, new_, lines_, still_ = hk
+            keys_ = ", ".join("%s (%s)" % (h["key"], pn) for pn, h in lines_)
+            hk_cb = QCheckBox(("Hotkeys: %s put \"%s\" \u2192 \"%s\"" % (keys_, old_, new_)).replace("&", "&&"))
+            hk_cb.setChecked(not still_)
+            hk_cb.setToolTip("Ticked when no track has \"%s\" any more" % old_)
+            v.addWidget(hk_cb)
+        if not cands:
+            lb.setText("Hotkeys use the old tag%s. Should they put the new one?" % (
+                " (some tracks still have it)" if hk[4] else ""))
         boxes = []
         for c in cands:
             have = (rows_before or {}).get(c["path"], set())
@@ -16208,6 +16478,12 @@ class MainWindow(TitleBarMixin, QMainWindow):
         v.addWidget(bb)
         if not dlg.exec():
             return False
+        if hk_cb is not None and hk_cb.isChecked():
+            for _, h in hk[3]:
+                h["tag"] = hk[2]
+            save_config(self.cfg)
+            self._rebuild_hotkeys()
+            log.info("hotkeys: %s -> %s (%d keys)", hk[1], hk[2], len(hk[3]))
         state = {}
         for cb, c in boxes:
             if cb.isChecked():
@@ -16249,8 +16525,12 @@ class MainWindow(TitleBarMixin, QMainWindow):
             self.model.end_group()
         self.statusBar().showMessage("Replaced \"%s\" with \"%s\" on %d track%s (Ctrl+Z undoes it)"
                                      % (old, new, n, "" if n == 1 else "s"), 6000)
-        if n and cands:
-            QTimer.singleShot(0, lambda: self.offer_rule_update(cands, set(rows), rows_before))
+        hkl = self._hk_uses(f, old)                     # 1.2.4: the hotkeys too
+        if n and (cands or hkl):
+            still = any(old.strip().lower() in {x.strip().lower() for x in re.split(r"[,;]", t.get(f, ""))}
+                        for t in self.model.tracks)
+            QTimer.singleShot(0, lambda: self.offer_rule_update(cands, set(rows), rows_before,
+                                                                hk=(f, old, new, hkl, still)))
         return n > 0
 
     def bring_to_front(self, rows, f, tag):
@@ -17151,12 +17431,25 @@ class MainWindow(TitleBarMixin, QMainWindow):
         if not self.model.redo():
             self.statusBar().showMessage("Nothing to redo")
 
+    def _style_undo(self, u_on, r_on):
+        """1.2.5: the Undo / Redo frame: accent border while there is a step; a side with none is grey."""
+        if not hasattr(self, "undo_frame"):
+            return
+        acc = THEME.get("accent", "#C9732F")
+        grey, off = "#3a404a", "#2a2f37"
+        line = acc if (u_on or r_on) else grey
+        self.undo_frame.setStyleSheet("#undoFrame{border:1px solid %s;border-radius:6px;}" % line)
+        self.undo_div.setStyleSheet("background:%s;" % line)
+        for b_, on in ((self.btn_undo, u_on), (self.btn_redo, r_on)):
+            b_.setStyleSheet("" if on else "QToolButton{background:%s;border:none;border-radius:0;}" % off)
+
     def _update_undo(self):
         u, r = len(self.model.undo_stack), len(self.model.redo_stack)
         for w in (self.btn_undo, self.act_undo):
             w.setEnabled(u > 0)
         for w in (self.btn_redo, self.act_redo):
             w.setEnabled(r > 0)
+        self._style_undo(u > 0, r > 0)
         self.btn_undo.setToolTip("Undo (Ctrl+Z): %d step%s available" % (u, "" if u == 1 else "s"))
         self.btn_redo.setToolTip("Redo (Ctrl+Y): %d step%s available" % (r, "" if r == 1 else "s"))
 
@@ -17167,23 +17460,10 @@ class MainWindow(TitleBarMixin, QMainWindow):
         self.model.end_group()
 
     def quick_tags(self, f):
+        """1.2.5: the field's button opens Edit lists on that field's tab (the small tag window is gone)."""
         crumb("quick_tags")
-        t0 = time.time()
-        rows = self.selected_rows()
-        dlg = QuickTagDialog(self, self.cfg, f, len(rows))
-        QTimer.singleShot(0, lambda: log.info("%s tag list opened in %d ms (%d tracks selected)",
-                                              f, (time.time() - t0) * 1000, len(rows)))
-        dlg.exec()
-        if dlg.added:
-            save_config(self.cfg)
-            self.model.invalidate()
-            if dlg.apply.isChecked() and rows:
-                self.model.begin_group()
-                for tag in dlg.added:
-                    self.apply_tag(rows, f, tag, force="add")
-                self.model.end_group()
-        if dlg.edit_lists:
-            self.edit_tag_lists(field=f)             # 1.2.3: on that field's tab
+        log.info("%s tags button: opening Edit lists", f)
+        self.edit_tag_lists(field=f)
 
     def locate_playing(self):
         crumb("locate_playing")
@@ -17773,15 +18053,24 @@ class MainWindow(TitleBarMixin, QMainWindow):
             try:
                 tg, _ = _open_id3(path)
                 geob = next((g for g in tg.getall("GEOB") if g.desc == "Serato BeatGrid"), None)
-                if any(g.desc == "Serato Tempo Map" for g in tg.getall("GEOB")):
-                    skipped.append((t, "has a tempo map (several tempos)"))
-                    continue
-                new_grid = beatgrid_scaled(geob.data, factor) if geob is not None else None
-                if geob is not None and new_grid is None:
-                    skipped.append((t, "its beatgrid cannot be scaled (odd number of beats)"))
-                    continue
+                tmap = next((g for g in tg.getall("GEOB") if g.desc == "Serato Tempo Map"), None)
+                auto = next((g for g in tg.getall("GEOB") if g.desc == "Serato Autotags"), None)
+                desc = "Serato BeatGrid"
+                if tmap is not None:                  # 1.2.5: Serato's newer grid (one tempo or several)
+                    new_grid = tempo_map_scaled(tmap.data, factor)
+                    if new_grid is None:
+                        skipped.append((t, "a tempo change of its tempo map is on an odd beat" if factor < 1
+                                        else "its tempo map is not understood"))
+                        continue
+                    geob, desc = tmap, "Serato Tempo Map"
+                else:
+                    new_grid = beatgrid_scaled(geob.data, factor) if geob is not None else None
+                    if geob is not None and new_grid is None:
+                        skipped.append((t, "its beatgrid cannot be scaled (odd number of beats)"))
+                        continue
                 old_bpm = str(tg["TBPM"].text[0]) if "TBPM" in tg and tg["TBPM"].text else ""
-                grid = parse_beatgrid(geob.data) if geob is not None else []
+                grid = (parse_tempo_map(geob.data) if desc == "Serato Tempo Map" else parse_beatgrid(geob.data)) \
+                    if geob is not None else []
                 try:
                     base = grid[-1][2] if grid else float(t.get("bpm") or old_bpm or 0)   # the grid's tempo first
                 except ValueError:
@@ -17794,7 +18083,9 @@ class MainWindow(TitleBarMixin, QMainWindow):
                 dec = len(str(t.get("bpm", "")).split(".")[1]) if "." in str(t.get("bpm", "")) else 2
                 lib_new = ("%." + str(dec) + "f") % nb
                 plans.append({"row": r, "path": path, "old_grid": geob.data if geob is not None else None,
-                              "new_grid": new_grid, "old_tbpm": old_bpm,
+                              "new_grid": new_grid, "desc": desc,
+                              "old_auto": auto.data if auto is not None else None,
+                              "new_auto": autotags_scaled(auto.data, nb) if auto is not None else None, "old_tbpm": old_bpm,
                               "new_tbpm": ("%." + str(tdec) + "f") % nb if tdec else str(int(round(nb))), "old_lib": t.get("bpm", ""), "new_lib": lib_new})
             except Exception as e:
                 skipped.append((t, str(e)))
@@ -17809,9 +18100,14 @@ class MainWindow(TitleBarMixin, QMainWindow):
                 tg, save = _open_id3(pl["path"])
                 grid = pl["new_grid"] if which == "new" else pl["old_grid"]
                 if grid is not None:
-                    g = next((x for x in tg.getall("GEOB") if x.desc == "Serato BeatGrid"), None)
+                    g = next((x for x in tg.getall("GEOB") if x.desc == pl.get("desc", "Serato BeatGrid")), None)
                     if g is not None:
                         g.data = grid
+                au = pl.get("new_auto") if which == "new" else pl.get("old_auto")
+                if au is not None and pl.get("new_auto") is not None:          # 1.2.5: Serato's BPM text too
+                    g = next((x for x in tg.getall("GEOB") if x.desc == "Serato Autotags"), None)
+                    if g is not None:
+                        g.data = au
                 tb = pl["new_tbpm"] if which == "new" else pl["old_tbpm"]
                 if tb:
                     tg.setall("TBPM", [TBPM(encoding=3, text=[tb])])
